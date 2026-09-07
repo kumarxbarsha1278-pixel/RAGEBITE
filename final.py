@@ -18,7 +18,7 @@ import string
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # ==================== CONFIG ====================
-BOT_TOKEN = '8848183144:AAHJD65jdzID6Eotvyk3Lg3XY4h8eCKYGWI'
+BOT_TOKEN = '8848183144:AAH-mCNWs_BgajXro8OOrrYWEXKXw_mASRI'
 
 # ============ API CONFIGURATION (COMPLETELY HIDDEN) ============
 API_BASE_URL = "https://api.godstress.site/api/v1/attack/start"
@@ -219,6 +219,23 @@ def clean_expired_keys():
         print(f"🧹 Cleaned {len(expired_keys)} expired keys")
     return len(expired_keys)
 
+# ==================== CLEAN STUCK ATTACKS ====================
+
+def clean_stuck_attacks():
+    """Remove all expired/stuck attacks"""
+    current_time = now()
+    stuck_users = []
+    for uid, attack in state["user_attacks"].items():
+        if attack.get("expires", 0) < current_time:
+            stuck_users.append(uid)
+    
+    if stuck_users:
+        for uid in stuck_users:
+            del state["user_attacks"][uid]
+        save_state()
+        print(f"🧹 Cleaned {len(stuck_users)} stuck attacks")
+    return len(stuck_users)
+
 # ==================== BOT SETUP ====================
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -317,14 +334,20 @@ def check_access(func):
 
 # ==================== TIMER FUNCTION ====================
 
-def update_timer(chat_id, msg_id, target, port, duration, is_admin_user, is_owner_user):
+def update_timer(chat_id, msg_id, target, port, duration, is_admin_user, is_owner_user, user_id):
     try:
         elapsed = 0
+        last_update = 0
+        
         while elapsed < duration:
-            time.sleep(5)
-            elapsed += 5
-            remaining = duration - elapsed
+            time.sleep(2)
+            elapsed += 2
             
+            if elapsed - last_update < 5 and elapsed < duration:
+                continue
+            last_update = elapsed
+            
+            remaining = duration - elapsed
             if remaining <= 0:
                 break
             
@@ -333,6 +356,10 @@ def update_timer(chat_id, msg_id, target, port, duration, is_admin_user, is_owne
             bar_length = 20
             filled = int((elapsed / duration) * bar_length)
             bar = "█" * filled + "░" * (bar_length - filled)
+            
+            # Get fresh active count
+            clean_stuck_attacks()
+            active_attacks = len([a for a in state["user_attacks"].values() if a.get("expires", 0) > now()])
             
             if is_owner_user:
                 admin_tag = " 👑 OWNER"
@@ -344,6 +371,7 @@ def update_timer(chat_id, msg_id, target, port, duration, is_admin_user, is_owne
 📊 Progress: [{bar}] {int((elapsed/duration)*100)}%
 
 ⌛ Finishes: {finish_time}
+📊 Active: {active_attacks}/{TOTAL_SLOTS}
 
 🔥 RAGEBITE ULTIMATE POWER"""
             elif is_admin_user:
@@ -356,6 +384,7 @@ def update_timer(chat_id, msg_id, target, port, duration, is_admin_user, is_owne
 📊 Progress: [{bar}] {int((elapsed/duration)*100)}%
 
 ⌛ Finishes: {finish_time}
+📊 Active: {active_attacks}/{TOTAL_SLOTS}
 
 🔥 RAGEBITE ULTIMATE POWER"""
             else:
@@ -367,6 +396,7 @@ def update_timer(chat_id, msg_id, target, port, duration, is_admin_user, is_owne
 📊 Progress: [{bar}] {int((elapsed/duration)*100)}%
 
 ⌛ Finishes: {finish_time}
+📊 Active: {active_attacks}/{TOTAL_SLOTS}
 
 🔥 RAGEBITE ULTIMATE POWER"""
             
@@ -1332,6 +1362,9 @@ def show_all_users(message):
         bot.reply_to(message, "ℹ️ No users found.")
         return
     
+    # Clean stuck attacks first
+    clean_stuck_attacks()
+    
     response = "👥 Authorized Users:\n\n"
     for uid in allowed_user_ids:
         try:
@@ -1340,7 +1373,7 @@ def show_all_users(message):
             
             if uid in state["user_attacks"]:
                 attack = state["user_attacks"][uid]
-                if attack["expires"] > now():
+                if attack.get("expires", 0) > now():
                     remaining = int(attack["expires"] - now())
                     status_icon = f"🔴 Active ({remaining}s left)"
                 else:
@@ -1391,23 +1424,42 @@ def handle_bgmi(message):
         bot.reply_to(message, "❌ Port and time must be numbers.")
         return
     
+    # ========== CLEANUP STUCK ATTACKS ==========
+    clean_stuck_attacks()
+    
+    # ========== CHECK IF THIS USER HAS ACTIVE ATTACK ==========
     if not is_owner(user_id):
         if user_id in state["user_attacks"]:
             attack_data = state["user_attacks"][user_id]
-            if attack_data["expires"] > now():
+            if attack_data.get("expires", 0) > now():
                 remaining = int(attack_data["expires"] - now())
                 bot.reply_to(message, f"""❌ ATTACK IN PROGRESS!
 
 ⏱ Time remaining: {remaining}s
-🎯 Target: {attack_data['ip']}:{attack_data['port']}
+🎯 Target: {attack_data.get('ip', 'Unknown')}:{attack_data.get('port', 'Unknown')}
 
 ⚠️ Wait for current attack to finish!
 Only 1 attack at a time per person.""")
                 return
             else:
+                # Attack expired but not cleaned - clean it now
                 del state["user_attacks"][user_id]
                 save_state()
     
+    # ========== CHECK SLOT AVAILABILITY ==========
+    active_attacks = [a for a in state["user_attacks"].values() if a.get("expires", 0) > now()]
+    active_count = len(active_attacks)
+    
+    if active_count >= TOTAL_SLOTS and not is_owner(user_id):
+        bot.reply_to(message, f"""❌ ALL SLOTS BUSY!
+
+📊 Active: {active_count}/{TOTAL_SLOTS}
+
+⚠️ All attack slots are currently in use.
+Please wait for an ongoing attack to finish.""")
+        return
+    
+    # ========== LOG AND START ATTACK ==========
     log_command(user_id, target, port, duration)
     
     msg = bot.reply_to(message, "⚡ Initiating Ultimate Attack...")
@@ -1460,7 +1512,7 @@ Only 1 attack at a time per person.""")
     finish_time = (datetime.datetime.now() + datetime.timedelta(seconds=duration)).strftime('%H:%M:%S')
     is_admin_user = is_admin(user_id)
     is_owner_user = is_owner(user_id)
-    active_attacks = len([a for a in state["user_attacks"].values() if a["expires"] > now()])
+    active_attacks_now = len([a for a in state["user_attacks"].values() if a.get("expires", 0) > now()])
     
     if is_owner_user:
         admin_tag = " 👑 OWNER"
@@ -1472,7 +1524,7 @@ Only 1 attack at a time per person.""")
 📊 Progress: [░░░░░░░░░░░░░░░░░░░░] 0%
 
 ⌛ Finishes: {finish_time}
-📊 Active: {active_attacks}/{TOTAL_SLOTS}
+📊 Active: {active_attacks_now}/{TOTAL_SLOTS}
 
 🔥 RAGEBITE ULTIMATE POWER"""
     elif is_admin_user:
@@ -1485,7 +1537,7 @@ Only 1 attack at a time per person.""")
 📊 Progress: [░░░░░░░░░░░░░░░░░░░░] 0%
 
 ⌛ Finishes: {finish_time}
-📊 Active: {active_attacks}/{TOTAL_SLOTS}
+📊 Active: {active_attacks_now}/{TOTAL_SLOTS}
 
 🔥 RAGEBITE ULTIMATE POWER"""
     else:
@@ -1497,21 +1549,24 @@ Only 1 attack at a time per person.""")
 📊 Progress: [░░░░░░░░░░░░░░░░░░░░] 0%
 
 ⌛ Finishes: {finish_time}
-📊 Active: {active_attacks}/{TOTAL_SLOTS}
+📊 Active: {active_attacks_now}/{TOTAL_SLOTS}
 
 🔥 RAGEBITE ULTIMATE POWER"""
     
     bot.edit_message_text(timer_text, chat_id, msg_id)
     
+    # ========== START TIMER THREAD ==========
     threading.Thread(
         target=update_timer,
-        args=(chat_id, msg_id, target, port, duration, is_admin_user, is_owner_user),
+        args=(chat_id, msg_id, target, port, duration, is_admin_user, is_owner_user, user_id),
         daemon=True
     ).start()
     
+    # ========== NOTIFY END ==========
     def notify_end():
         time.sleep(duration + 3)
         
+        # Clean up this user's attack
         if user_id in state["user_attacks"]:
             del state["user_attacks"][user_id]
             save_state()
@@ -1540,17 +1595,7 @@ Only 1 attack at a time per person.""")
 @bot.message_handler(commands=['activeattacks'])
 @admin_only
 def active_attacks_command(message):
-    current_time = now()
-    expired_users = []
-    for uid, attack in state["user_attacks"].items():
-        if attack["expires"] < current_time:
-            expired_users.append(uid)
-    
-    for uid in expired_users:
-        del state["user_attacks"][uid]
-    
-    if expired_users:
-        save_state()
+    clean_stuck_attacks()
     
     if not state["user_attacks"]:
         bot.reply_to(message, "📊 No active attacks currently.")
@@ -1561,7 +1606,7 @@ def active_attacks_command(message):
     
     attack_count = 0
     for uid, attack in state["user_attacks"].items():
-        if attack["expires"] > now():
+        if attack.get("expires", 0) > now():
             attack_count += 1
             remaining = int(attack["expires"] - now())
             
@@ -1625,13 +1670,15 @@ def attack_history_command(message):
 def status_attack(message):
     user_id = str(message.chat.id)
     
+    clean_stuck_attacks()
+    
     if user_id in state["user_attacks"]:
         attack = state["user_attacks"][user_id]
-        remaining = int(attack["expires"] - now())
+        remaining = int(attack.get("expires", 0) - now())
         if remaining > 0:
             response = f'''⚡ YOUR ATTACK STATUS:
 
-🎯 Target: {attack['ip']}:{attack['port']}
+🎯 Target: {attack.get('ip', 'Unknown')}:{attack.get('port', 'Unknown')}
 ⏱ Time remaining: {remaining}s
 🔄 Active: Yes
 
@@ -1640,7 +1687,7 @@ def status_attack(message):
             bot.reply_to(message, response)
             return
     
-    active_attacks = len([a for a in state["user_attacks"].values() if a["expires"] > now()])
+    active_attacks = len([a for a in state["user_attacks"].values() if a.get("expires", 0) > now()])
     
     if is_owner(user_id):
         response = f'''⚡ RAGEBITE STATUS - OWNER VIEW:
@@ -1675,8 +1722,10 @@ def status_attack(message):
 def stats_command(message):
     user_id = str(message.chat.id)
     
+    clean_stuck_attacks()
+    
     total_users = len(allowed_user_ids)
-    active_users = len([a for a in state["user_attacks"].values() if a["expires"] > now()])
+    active_users = len([a for a in state["user_attacks"].values() if a.get("expires", 0) > now()])
     history_count = len(state.get("attack_history", []))
     
     if is_owner(user_id):
@@ -1721,7 +1770,8 @@ def stats_command(message):
 @bot.message_handler(commands=['ownerpanel'])
 @owner_only
 def owner_panel(message):
-    active = len([a for a in state["user_attacks"].values() if a["expires"] > now()])
+    clean_stuck_attacks()
+    active = len([a for a in state["user_attacks"].values() if a.get("expires", 0) > now()])
     response = f'''👑 RAGEBITE OWNER PANEL
 
 📊 SYSTEM STATUS:
@@ -1821,6 +1871,7 @@ def main():
     
     # Clean expired keys on startup
     clean_expired_keys()
+    clean_stuck_attacks()
     
     threading.Thread(target=start_health_server, daemon=True).start()
     
