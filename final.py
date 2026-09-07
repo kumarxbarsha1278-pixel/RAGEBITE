@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
 RAGEBITE ATTACK BOT - 4 SLOTS
-✅ Slot-based attack management
 ✅ Different users can attack simultaneously
 ✅ Same user = 1 attack at a time
+✅ Auto-cleanup of stuck attacks
+✅ Proper status management
 Run: python ragebite_bot.py
 """
 
@@ -62,7 +63,7 @@ state = {
     "owners": [OWNER_ID],
     "groups": [],
     "redeem_keys": {},
-    "attack_slots": [],  # NEW: Slot-based system
+    "attack_slots": [],
     "attack_history": []
 }
 
@@ -95,7 +96,6 @@ def load_state():
     if not state["attack_slots"]:
         state["attack_slots"] = [None] * TOTAL_SLOTS
     elif len(state["attack_slots"]) < TOTAL_SLOTS:
-        # Add missing slots
         while len(state["attack_slots"]) < TOTAL_SLOTS:
             state["attack_slots"].append(None)
     
@@ -227,10 +227,10 @@ def clean_expired_keys():
         print(f"🧹 Cleaned {len(expired_keys)} expired keys")
     return len(expired_keys)
 
-# ==================== SLOT MANAGEMENT FUNCTIONS ====================
+# ==================== SLOT MANAGEMENT ====================
 
 def get_available_slot():
-    """Get first empty slot"""
+    """Get first available empty slot"""
     for i, slot in enumerate(state["attack_slots"]):
         if slot is None:
             return i
@@ -243,13 +243,30 @@ def get_user_attack_slot(user_id):
             return slot
     return None
 
+def is_user_attacking(user_id):
+    """Check if user has active attack"""
+    for slot in state["attack_slots"]:
+        if slot and slot.get('status') == 'running' and slot.get('user_id') == user_id:
+            return True
+    return False
+
 def get_active_attack_count():
-    """Get count of active attacks"""
+    """Get number of currently running attacks"""
     count = 0
     for slot in state["attack_slots"]:
         if slot and slot.get('status') == 'running':
             count += 1
     return count
+
+def get_active_users_list():
+    """Get list of users currently attacking"""
+    users = []
+    for slot in state["attack_slots"]:
+        if slot and slot.get('status') == 'running':
+            users.append(slot['user_id'])
+    if not users:
+        return "None"
+    return ", ".join(users)
 
 def clean_stuck_attacks():
     """Remove expired/stuck attacks from slots"""
@@ -297,9 +314,10 @@ def assign_attack_to_slot(user_id, target, port, duration, username, is_admin_us
 def remove_attack_from_slot(user_id):
     """Remove attack from slot when completed"""
     for i, slot in enumerate(state["attack_slots"]):
-        if slot and slot.get('user_id') == user_id:
+        if slot and slot.get('user_id') == user_id and slot.get('status') == 'running':
             state["attack_slots"][i] = None
             save_state()
+            print(f"🧹 Removed attack for user: {user_id} from slot {i}")
             return True
     return False
 
@@ -473,7 +491,6 @@ def update_timer(chat_id, msg_id, target, port, duration, is_admin_user, is_owne
     except Exception as e:
         print(f"Timer thread error: {e}")
     finally:
-        # Force cleanup when timer ends
         try:
             remove_attack_from_slot(user_id)
             print(f"🧹 Timer cleaned attack for user: {user_id} from slot {slot_index}")
@@ -1012,8 +1029,7 @@ def keyslist_command(message):
     
     if key_count == 0:
         bot.reply_to(message, "ℹ️ No keys found.")
-        return
-    
+        return    
     bot.reply_to(message, response, parse_mode='Markdown')
 
 @bot.message_handler(commands=['deletekey'])
@@ -1433,10 +1449,13 @@ def show_all_users(message):
             user_info = bot.get_chat(int(uid))
             username = f"@{user_info.username}" if user_info.username else uid
             
-            attack_slot = get_user_attack_slot(uid)
-            if attack_slot:
-                remaining = int(attack_slot.get('expires', 0) - now())
-                status_icon = f"🔴 Active ({remaining}s left)"
+            if is_user_attacking(uid):
+                attack_slot = get_user_attack_slot(uid)
+                if attack_slot:
+                    remaining = int(attack_slot.get('expires', 0) - now())
+                    status_icon = f"🔴 Active ({remaining}s left)"
+                else:
+                    status_icon = "🔴 Active"
             else:
                 status_icon = "🟢 Free"
             
@@ -1449,7 +1468,7 @@ def show_all_users(message):
     
     bot.reply_to(message, response)
 
-# ==================== BGMI ATTACK COMMAND - SLOT BASED ====================
+# ==================== BGMI ATTACK COMMAND ====================
 
 @bot.message_handler(commands=['bgmi'])
 @check_access
@@ -1487,23 +1506,22 @@ def handle_bgmi(message):
     clean_stuck_attacks()
     
     # ========== CHECK IF THIS USER HAS ACTIVE ATTACK ==========
-    # ONLY CHECK SAME USER - NOT OTHER USERS
     if not is_owner(user_id):
-        existing_attack = get_user_attack_slot(user_id)
-        if existing_attack:
-            remaining = int(existing_attack.get('expires', 0) - now())
-            if remaining > 0:
-                bot.reply_to(message, f"""❌ ATTACK IN PROGRESS!
+        if is_user_attacking(user_id):
+            existing_attack = get_user_attack_slot(user_id)
+            if existing_attack:
+                remaining = int(existing_attack.get('expires', 0) - now())
+                if remaining > 0:
+                    bot.reply_to(message, f"""❌ ATTACK IN PROGRESS!
 
 ⏱ Time remaining: {remaining}s
 🎯 Target: {existing_attack.get('ip', 'Unknown')}:{existing_attack.get('port', 'Unknown')}
 
 ⚠️ Wait for current attack to finish!
 Only 1 attack at a time per person.""")
-                return
-            else:
-                # Attack expired but not cleaned - clean it now
-                remove_attack_from_slot(user_id)
+                    return
+                else:
+                    remove_attack_from_slot(user_id)
     
     # ========== CHECK AVAILABLE SLOT ==========
     available_slot = get_available_slot()
@@ -1515,14 +1533,13 @@ Only 1 attack at a time per person.""")
 📊 Active: {active_count}/{TOTAL_SLOTS}
 
 ⚠️ All attack slots are currently in use.
-Please wait for an ongoing attack to finish.""")
+Please wait for an ongoing attack to finish.
+👥 Active Users: {get_active_users_list()}""")
         return
     
-    # Owner can attack even if slots are full
+    # Owner override
     if available_slot == -1 and is_owner(user_id):
-        # Find first slot and replace it (owner override)
         available_slot = 0
-        # Clean the slot first
         if state["attack_slots"][0]:
             state["attack_slots"][0] = None
             save_state()
@@ -1637,8 +1654,6 @@ Please wait for an ongoing attack to finish.""")
     # ========== NOTIFY END ==========
     def notify_end():
         time.sleep(duration + 3)
-        
-        # Clean up this user's attack from slot
         remove_attack_from_slot(user_id)
         
         try:
