@@ -18,7 +18,7 @@ import string
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # ==================== CONFIG ====================
-BOT_TOKEN = '8650600804:AAEO1l-lvFGw65izSUy2Mx9p3BhmQ8_Qs9w'
+BOT_TOKEN = '8848183144:AAHJD65jdzID6Eotvyk3Lg3XY4h8eCKYGWI'
 
 # ============ API CONFIGURATION (COMPLETELY HIDDEN) ============
 API_BASE_URL = "https://api.godstress.site/api/v1/attack/start"
@@ -27,7 +27,6 @@ API_METHOD = "UDP-BIG"
 TOTAL_SLOTS = 4
 
 OWNER_ID = "6321758394"
-ADMIN_IDS = ["7255464548"]
 
 USER_FILE = "users.txt"
 LOG_FILE = "log.txt"
@@ -201,6 +200,24 @@ def redeem_key(user_id, key):
     
     expiry_time = datetime.datetime.fromtimestamp(key_data["expires"]).strftime('%Y-%m-%d %H:%M:%S')
     return True, f"✅ Key redeemed!\n📅 Access until: {expiry_time}"
+
+# ==================== CLEAN EXPIRED KEYS FUNCTION ====================
+
+def clean_expired_keys():
+    """Remove all expired keys from database"""
+    current_time = now()
+    expired_keys = []
+    
+    for key, data in state["redeem_keys"].items():
+        if data.get("expires", 0) < current_time:
+            expired_keys.append(key)
+    
+    if expired_keys:
+        for key in expired_keys:
+            del state["redeem_keys"][key]
+        save_state()
+        print(f"🧹 Cleaned {len(expired_keys)} expired keys")
+    return len(expired_keys)
 
 # ==================== BOT SETUP ====================
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -405,9 +422,12 @@ def welcome_start(message):
 /removeadmin <id> - Remove admin
 /addreseller <id> <coins> - Add reseller
 /removereseller <id> - Remove reseller
+/resellerlist - List all resellers
 /addgroup <group_id> - Add group access
 /removegroup <group_id> - Remove group access
 /groups - List allowed groups
+/deletekey <key> - Delete any key
+/cleankeys - Remove all expired keys
 
 🔥 Features:
 • Ultimate Power
@@ -440,12 +460,14 @@ def welcome_start(message):
 /removeadmin <id> - Remove admin
 /addreseller <id> <coins> - Add reseller
 /removereseller <id> - Remove reseller
+/resellerlist - List all resellers
 /addgroup <group_id> - Add group access
 /removegroup <group_id> - Remove group access
 /groups - List allowed groups
-/sellers - List all resellers
 /sellerbalance <id> - Check reseller balance
 /addbalance <id> <amount> - Add balance
+/deletekey <key> - Delete any key
+/cleankeys - Remove all expired keys
 
 🔥 Features:
 • Ultimate Power
@@ -477,6 +499,7 @@ def welcome_start(message):
 /generate 1hr/1day/2days/1week/15days/1month - Generate key
 /balance - Check your coin balance
 /keyslist - Show your generated keys
+/deletekey <key> - Delete your generated key
 
 📌 IMPORTANT:
 • Generate a key: /generate 1day
@@ -529,6 +552,8 @@ def show_help(message):
 
 🔑 Key Commands:
 /redeem <key> - Activate access key
+/deletekey <key> - Delete any key
+/cleankeys - Remove all expired keys
 
 📊 Info Commands:
 /status - Check your attack status
@@ -542,6 +567,7 @@ def show_help(message):
 /removeadmin <id> - Remove admin
 /addreseller <id> <coins> - Add reseller
 /removereseller <id> - Remove reseller
+/resellerlist - List all resellers
 /addgroup <group_id> - Add group access
 /removegroup <group_id> - Remove group access
 /groups - List allowed groups
@@ -558,12 +584,14 @@ def show_help(message):
 /removeadmin <id> - Remove admin
 /addreseller <id> <coins> - Add reseller
 /removereseller <id> - Remove reseller
+/resellerlist - List all resellers
 /addgroup <group_id> - Add group access
 /removegroup <group_id> - Remove group access
 /groups - List allowed groups
-/sellers - List all resellers
 /sellerbalance <id> - Check reseller balance
 /addbalance <id> <amount> - Add balance
+/deletekey <key> - Delete any key
+/cleankeys - Remove all expired keys
 
 📌 RULES:
 • 4 Slots available
@@ -579,6 +607,8 @@ def show_help(message):
 
 🔑 Key Commands:
 /redeem <key> - Activate access key
+/deletekey <key> - Delete any key
+/cleankeys - Remove all expired keys
 
 📊 Info Commands:
 /status - Check your attack status
@@ -597,12 +627,14 @@ def show_help(message):
 /removeadmin <id> - Remove admin
 /addreseller <id> <coins> - Add reseller
 /removereseller <id> - Remove reseller
+/resellerlist - List all resellers
 /addgroup <group_id> - Add group access
 /removegroup <group_id> - Remove group access
 /groups - List allowed groups
-/sellers - List all resellers
 /sellerbalance <id> - Check reseller balance
 /addbalance <id> <amount> - Add balance
+/deletekey <key> - Delete any key
+/cleankeys - Remove all expired keys
 
 📌 RULES:
 • 4 Slots available
@@ -619,6 +651,7 @@ def show_help(message):
 🔑 Key Commands:
 /redeem <key> - Activate access key
 /generate 1hr/1day/2days/1week/15days/1month - Generate key
+/deletekey <key> - Delete your generated key
 
 📊 Info Commands:
 /status - Check your attack status
@@ -631,6 +664,7 @@ def show_help(message):
 /generate 1hr/1day/2days/1week/15days/1month - Generate key
 /keyslist - Show your generated keys
 /balance - Check your coin balance
+/deletekey <key> - Delete your generated key
 
 💰 Your Balance: {balance} coins
 
@@ -860,6 +894,9 @@ def keyslist_command(message):
         bot.reply_to(message, "ℹ️ No keys generated yet.")
         return
     
+    # Clean expired keys first
+    clean_expired_keys()
+    
     response = "🔑 Generated Keys:\n\n"
     key_count = 0
     for key, data in state["redeem_keys"].items():
@@ -880,11 +917,13 @@ def keyslist_command(message):
     bot.reply_to(message, response, parse_mode='Markdown')
 
 @bot.message_handler(commands=['deletekey'])
-@admin_only
 def delete_key_command(message):
+    """Delete a key - Admin can delete any key, Reseller can delete only their own keys"""
+    user_id = str(message.chat.id)
     command = message.text.split()
+    
     if len(command) != 2:
-        bot.reply_to(message, "❌ Usage: /deletekey <key>")
+        bot.reply_to(message, "❌ Usage: /deletekey <key>\nExample: /deletekey ABC123XYZ")
         return
     
     key = command[1].upper()
@@ -893,9 +932,38 @@ def delete_key_command(message):
         bot.reply_to(message, "❌ Key not found.")
         return
     
-    del state["redeem_keys"][key]
-    save_state()
-    bot.reply_to(message, f"✅ Key `{key}` deleted successfully!", parse_mode='Markdown')
+    key_data = state["redeem_keys"][key]
+    
+    # Check permissions
+    if is_admin(user_id) or is_owner(user_id):
+        # Admin/Owner can delete any key
+        del state["redeem_keys"][key]
+        save_state()
+        bot.reply_to(message, f"✅ Key `{key}` deleted successfully!", parse_mode='Markdown')
+        return
+    
+    if is_reseller(user_id):
+        # Reseller can only delete keys they generated
+        if key_data.get("generated_by") == user_id:
+            del state["redeem_keys"][key]
+            save_state()
+            bot.reply_to(message, f"✅ Your key `{key}` deleted successfully!", parse_mode='Markdown')
+        else:
+            bot.reply_to(message, "❌ You can only delete keys that you generated!")
+        return
+    
+    bot.reply_to(message, "❌ You don't have permission to delete this key.")
+
+@bot.message_handler(commands=['cleankeys'])
+@admin_only
+def clean_keys_command(message):
+    """Admin/Owner command to remove all expired keys"""
+    deleted = clean_expired_keys()
+    
+    if deleted > 0:
+        bot.reply_to(message, f"🧹 Cleaned {deleted} expired key(s) successfully!")
+    else:
+        bot.reply_to(message, "✅ No expired keys found to clean!")
 
 # ==================== RESELLER MANAGEMENT COMMANDS ====================
 
@@ -982,28 +1050,56 @@ def remove_reseller_command(message):
     
     bot.reply_to(message, f"✅ **Reseller Removed!**\n\n👤 ID: `{reseller_id}`", parse_mode='Markdown')
 
-@bot.message_handler(commands=['sellers'])
+@bot.message_handler(commands=['resellerlist'])
 @admin_only
-def list_sellers_command(message):
+def reseller_list_command(message):
+    """List all resellers with details - Only Admin/Owner can see"""
     resellers = state.get("resellers", [])
     
     if not resellers:
         bot.reply_to(message, "ℹ️ No resellers added yet.")
         return
     
-    response = "🛒 **Reseller List:**\n\n"
+    response = "🛒 **RESELLER LIST**\n"
+    response += "═" * 30 + "\n\n"
+    
     for reseller_id in resellers:
         balance = get_reseller_balance(reseller_id)
         has_key = user_approved(reseller_id)
         key_status = "✅ Active" if has_key else "❌ No Key"
+        
         try:
             user_info = bot.get_chat(int(reseller_id))
             username = f"@{user_info.username}" if user_info.username else reseller_id
-            response += f"• {username} (ID: `{reseller_id}`)\n   💰 {balance} coins | 🔑 {key_status}\n\n"
         except:
-            response += f"• ID: `{reseller_id}`\n   💰 {balance} coins | 🔑 {key_status}\n\n"
+            username = reseller_id
+        
+        total_keys = 0
+        used_keys = 0
+        for key, data in state["redeem_keys"].items():
+            if data.get("generated_by") == reseller_id:
+                total_keys += 1
+                if data.get("used", False):
+                    used_keys += 1
+        
+        response += f"""👤 **{username}**
+🆔 ID: `{reseller_id}`
+💰 Balance: {balance} coins
+🔑 Key Status: {key_status}
+📦 Keys Generated: {total_keys}
+✅ Keys Used: {used_keys}
+─────────────────
+"""
+    
+    response += f"\n📊 Total Resellers: {len(resellers)}"
     
     bot.reply_to(message, response, parse_mode='Markdown')
+
+@bot.message_handler(commands=['sellers'])
+@admin_only
+def sellers_command(message):
+    """Alias for resellerlist"""
+    reseller_list_command(message)
 
 @bot.message_handler(commands=['sellerbalance'])
 @admin_only
@@ -1021,7 +1117,21 @@ def seller_balance_command(message):
         return
     
     balance = get_reseller_balance(reseller_id)
-    bot.reply_to(message, f"💰 **Reseller Balance**\n\n👤 ID: `{reseller_id}`\n💰 Balance: `{balance}` coins", parse_mode='Markdown')
+    has_key = user_approved(reseller_id)
+    key_status = "✅ Active" if has_key else "❌ No Key"
+    
+    try:
+        user_info = bot.get_chat(int(reseller_id))
+        username = f"@{user_info.username}" if user_info.username else reseller_id
+    except:
+        username = reseller_id
+    
+    bot.reply_to(message, f"""💰 **Reseller Details**
+
+👤 Username: {username}
+🆔 ID: `{reseller_id}`
+💰 Balance: `{balance}` coins
+🔑 Key Status: {key_status}""", parse_mode='Markdown')
 
 @bot.message_handler(commands=['addbalance'])
 @admin_only
@@ -1627,6 +1737,7 @@ def owner_panel(message):
 • Resellers: {len(state.get("resellers", []))}
 • Groups: {len(state.get("groups", []))}
 • Total Attacks: {len(state.get("attack_history", []))}
+• Total Keys: {len(state.get("redeem_keys", []))}
 
 📌 RULES:
 • Different users can attack simultaneously
@@ -1638,10 +1749,13 @@ def owner_panel(message):
 /removeadmin <id> - Remove admin
 /addreseller <id> <coins> - Add reseller
 /removereseller <id> - Remove reseller
+/resellerlist - List all resellers
 /addgroup <group_id> - Add group
 /removegroup <group_id> - Remove group
 /groups - List groups
 /stats - Full statistics
+/deletekey <key> - Delete any key
+/cleankeys - Remove all expired keys
 /clearbotstate - Clear all state
 
 🔐 API: Protected
@@ -1705,6 +1819,9 @@ def main():
     global allowed_user_ids
     allowed_user_ids = read_users()
     
+    # Clean expired keys on startup
+    clean_expired_keys()
+    
     threading.Thread(target=start_health_server, daemon=True).start()
     
     print("="*50)
@@ -1715,6 +1832,7 @@ def main():
     print(f"🛒 Resellers: {state.get('resellers', [])}")
     print(f"📌 Groups: {state.get('groups', [])}")
     print(f"👥 Users: {len(allowed_user_ids)}")
+    print(f"🔑 Keys: {len(state.get('redeem_keys', []))}")
     print(f"🔑 API: Protected (Hidden from all users)")
     print(f"📊 Total Slots: {TOTAL_SLOTS}")
     print("="*50)
