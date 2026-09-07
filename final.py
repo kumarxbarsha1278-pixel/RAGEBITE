@@ -18,7 +18,7 @@ import string
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # ==================== CONFIG ====================
-BOT_TOKEN = '8848183144:AAHJD65jdzID6Eotvyk3Lg3XY4h8eCKYGWI'
+BOT_TOKEN = '8650600804:AAEO1l-lvFGw65izSUy2Mx9p3BhmQ8_Qs9w'
 
 # ============ API CONFIGURATION (COMPLETELY HIDDEN) ============
 API_BASE_URL = "https://api.godstress.site/api/v1/attack/start"
